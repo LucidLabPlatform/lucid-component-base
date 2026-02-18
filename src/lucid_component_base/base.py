@@ -270,3 +270,6 @@ class Component:
         self._state.status = status
         self._state.updated_at = _utc_iso()
         logger.debug("Component %s state=%s", self.component_id, status.value)
+        # Keep MQTT status topic in sync (e.g. "running" after auto-start)
+        self.publish_status()
+  

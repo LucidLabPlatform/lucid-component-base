@@ -2,7 +2,8 @@
 Component base class and lifecycle state.
 
 Unified MQTT contract: retained metadata, status, state, cfg, cfg/telemetry;
-stream logs, telemetry/<metric>; commands cmd/reset, cmd/identify; results evt/<action>/result.
+stream logs, telemetry/<metric>; commands cmd/reset, cmd/ping, cmd/cfg/set;
+results evt/<action>/result.
 """
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ class Component:
 
     Unified MQTT: subclasses use publish_metadata, publish_status, publish_state,
     publish_cfg, publish_telemetry_cfg, publish_log, publish_telemetry (gated),
-    publish_result. Telemetry gating is implemented centrally.
+    publish_result, publish_cfg_set_result. Telemetry gating is implemented centrally.
     """
 
     # Default telemetry config; override via set_telemetry_config()
@@ -100,7 +101,7 @@ class Component:
     def metadata(self) -> Dict[str, Any]:
         """
         Component metadata snapshot. Override to add capabilities.
-        Contract: { component_id, version, capabilities?: ["reset","identify", ...] }
+        Contract: { component_id, version, capabilities?: ["reset","ping", ...] }
         """
         return {
             "component_id": self.component_id,
@@ -112,7 +113,7 @@ class Component:
         return self._state
 
     def capabilities(self) -> list[str]:
-        """Override in subclasses to declare cmd support, e.g. ["reset","identify"]."""
+        """Override in subclasses to declare cmd support, e.g. ["reset","ping"]."""
         return []
 
     def get_state_payload(self) -> Dict[str, Any]:
@@ -205,6 +206,25 @@ class Component:
         """Publish evt/<action>/result. Contract: { request_id, ok, error }."""
         topic = self.context.topic(f"evt/{action}/result")
         payload = {"request_id": request_id, "ok": ok, "error": error}
+        self._publish_json(topic, payload, retain=False, qos=1)
+
+    def publish_cfg_set_result(
+        self,
+        request_id: str,
+        ok: bool,
+        applied: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        ts: Optional[str] = None,
+    ) -> None:
+        """Publish evt/cfg/set/result. Contract: { request_id, ok, applied, error, ts }."""
+        topic = self.context.topic("evt/cfg/set/result")
+        payload = {
+            "request_id": request_id,
+            "ok": ok,
+            "applied": applied,
+            "error": error,
+            "ts": ts if ts is not None else _utc_iso(),
+        }
         self._publish_json(topic, payload, retain=False, qos=1)
 
     def set_telemetry_config(self, cfg: Dict[str, Any]) -> None:

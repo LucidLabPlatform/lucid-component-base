@@ -1,7 +1,7 @@
 """
 Component base class and lifecycle state.
 
-Unified MQTT contract: retained metadata, status, state, cfg, cfg/telemetry;
+Unified MQTT contract: retained metadata, status, state, cfg;
 stream logs, telemetry/<metric>; commands cmd/reset, cmd/ping, cmd/cfg/set;
 results evt/<action>/result.
 """
@@ -70,7 +70,7 @@ class Component:
     - stop() may be called even if start() failed.
 
     Unified MQTT: subclasses use publish_metadata, publish_status, publish_state,
-    publish_cfg, publish_telemetry_cfg, publish_log, publish_telemetry (gated),
+    publish_cfg, publish_log, publish_telemetry (gated),
     publish_result, publish_cfg_set_result. Telemetry gating is implemented centrally.
     """
 
@@ -101,11 +101,24 @@ class Component:
     def metadata(self) -> Dict[str, Any]:
         """
         Component metadata snapshot. Override to add capabilities.
-        Contract: { component_id, version, capabilities?: ["reset","ping", ...] }
+        Contract: { component_id, version, capabilities?: ["reset","ping", ...], config_schema }
+        config_schema.telemetry.metrics reflects available metrics from state.
         """
+        # Get available metrics from state
+        state_payload = self.get_state_payload()
+        available_metrics = list(state_payload.keys()) if isinstance(state_payload, dict) else []
+        
         return {
             "component_id": self.component_id,
             "version": self.version,
+            "config_schema": {
+                "telemetry": {
+                    "enabled": "boolean",
+                    "metrics": f"object<string, boolean> (available: {', '.join(available_metrics) if available_metrics else 'none'})",
+                    "interval_s": "integer (min: 1)",
+                    "change_threshold_percent": "number (min: 0)",
+                },
+            },
         }
 
     @property
@@ -160,7 +173,7 @@ class Component:
     # -------------------------
 
     def publish_metadata(self) -> None:
-        """Publish retained metadata. Contract: { component_id, version, capabilities }."""
+        """Publish retained metadata. Contract: { component_id, version, capabilities, config_schema }."""
         payload = dict(self.metadata())
         payload["capabilities"] = self.capabilities()
         self._publish_retained("metadata", payload)
@@ -175,13 +188,32 @@ class Component:
         payload = state_payload if state_payload is not None else self.get_state_payload()
         self._publish_retained("state", payload)
 
-    def publish_cfg(self, cfg: Dict[str, Any]) -> None:
-        """Publish retained cfg (free-form)."""
+    def publish_cfg(self, cfg: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Publish retained cfg. Contract: { telemetry: { enabled, metrics, interval_s, change_threshold_percent } }.
+        If cfg is None, uses current telemetry config and ensures metrics reflect available state metrics.
+        """
+        if cfg is None:
+            # Get available metrics from state
+            state_payload = self.get_state_payload()
+            available_metrics = set(state_payload.keys()) if isinstance(state_payload, dict) else set()
+            
+            # Merge with current telemetry config, ensuring all state metrics are present
+            current_metrics = dict(self._telemetry_cfg.get("metrics", {}))
+            # Add any state metrics that aren't in current config (default to False)
+            for metric in available_metrics:
+                if metric not in current_metrics:
+                    current_metrics[metric] = False
+            
+            cfg = {
+                "telemetry": {
+                    "enabled": self._telemetry_cfg.get("enabled", False),
+                    "metrics": current_metrics,
+                    "interval_s": int(self._telemetry_cfg.get("interval_s", 2)),
+                    "change_threshold_percent": float(self._telemetry_cfg.get("change_threshold_percent", 2.0)),
+                },
+            }
         self._publish_retained("cfg", cfg)
-
-    def publish_telemetry_cfg(self, cfg: Dict[str, Any]) -> None:
-        """Publish retained cfg/telemetry. Contract: enabled, metrics, interval_s, change_threshold_percent."""
-        self._publish_retained("cfg/telemetry", cfg)
 
     def publish_log(self, level: str, message: str) -> None:
         """Publish logs stream. level: debug|info|warning|error."""

@@ -8,10 +8,14 @@ dynamic = ["version"]
 description = "Component contract and context for LUCID components (SDK only, no agent-core dependency)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = {text = "MIT"}
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["lucid_component_base*"]
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"

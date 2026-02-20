@@ -75,11 +75,9 @@ class Component:
     """
 
     # Default telemetry config; override via set_telemetry_config()
+    # Structure: { "metrics": { "metric_name": { "enabled": bool, "interval_s": int, "change_threshold_percent": float } } }
     _DEFAULT_TELEMETRY_CFG: Dict[str, Any] = {
-        "enabled": False,
         "metrics": {},
-        "interval_s": 2,
-        "change_threshold_percent": 2.0,
     }
 
     def __init__(self, context: ComponentContext) -> None:
@@ -101,24 +99,11 @@ class Component:
     def metadata(self) -> Dict[str, Any]:
         """
         Component metadata snapshot. Override to add capabilities.
-        Contract: { component_id, version, capabilities?: ["reset","ping", ...], config_schema }
-        config_schema.telemetry.metrics reflects available metrics from state.
+        Contract: { component_id, version, capabilities?: ["reset","ping", ...] }
         """
-        # Get available metrics from state
-        state_payload = self.get_state_payload()
-        available_metrics = list(state_payload.keys()) if isinstance(state_payload, dict) else []
-        
         return {
             "component_id": self.component_id,
             "version": self.version,
-            "config_schema": {
-                "telemetry": {
-                    "enabled": "boolean",
-                    "metrics": f"object<string, boolean> (available: {', '.join(available_metrics) if available_metrics else 'none'})",
-                    "interval_s": "integer (min: 1)",
-                    "change_threshold_percent": "number (min: 0)",
-                },
-            },
         }
 
     @property
@@ -173,7 +158,7 @@ class Component:
     # -------------------------
 
     def publish_metadata(self) -> None:
-        """Publish retained metadata. Contract: { component_id, version, capabilities, config_schema }."""
+        """Publish retained metadata. Contract: { component_id, version, capabilities }."""
         payload = dict(self.metadata())
         payload["capabilities"] = self.capabilities()
         self._publish_retained("metadata", payload)
@@ -190,29 +175,73 @@ class Component:
 
     def publish_cfg(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         """
-        Publish retained cfg. Contract: { telemetry: { enabled, metrics, interval_s, change_threshold_percent } }.
-        If cfg is None, uses current telemetry config and ensures metrics reflect available state metrics.
+        Publish retained cfg. Always includes ALL configurable keys with current values or defaults.
+        Contract: { telemetry: { metrics: { metric_name: { enabled, interval_s, change_threshold_percent } } } }.
+        If cfg is None, uses current telemetry config and ensures all state metrics are present with per-metric configs.
         """
         if cfg is None:
             # Get available metrics from state
             state_payload = self.get_state_payload()
             available_metrics = set(state_payload.keys()) if isinstance(state_payload, dict) else set()
             
-            # Merge with current telemetry config, ensuring all state metrics are present
+            # Get current metrics config
             current_metrics = dict(self._telemetry_cfg.get("metrics", {}))
-            # Add any state metrics that aren't in current config (default to False)
-            for metric in available_metrics:
-                if metric not in current_metrics:
-                    current_metrics[metric] = False
+            
+            # Ensure all state metrics are present with full config structure
+            metrics_cfg = {}
+            for metric_name in available_metrics:
+                if metric_name in current_metrics and isinstance(current_metrics[metric_name], dict):
+                    # Use existing config
+                    metrics_cfg[metric_name] = {
+                        "enabled": bool(current_metrics[metric_name].get("enabled", False)),
+                        "interval_s": int(current_metrics[metric_name].get("interval_s", 2)),
+                        "change_threshold_percent": float(current_metrics[metric_name].get("change_threshold_percent", 2.0)),
+                    }
+                else:
+                    # Default config for new metric
+                    metrics_cfg[metric_name] = {
+                        "enabled": False,
+                        "interval_s": 2,
+                        "change_threshold_percent": 2.0,
+                    }
             
             cfg = {
                 "telemetry": {
-                    "enabled": self._telemetry_cfg.get("enabled", False),
-                    "metrics": current_metrics,
-                    "interval_s": int(self._telemetry_cfg.get("interval_s", 2)),
-                    "change_threshold_percent": float(self._telemetry_cfg.get("change_threshold_percent", 2.0)),
+                    "metrics": metrics_cfg,
                 },
             }
+        else:
+            # Ensure cfg always has telemetry with all metrics
+            if "telemetry" not in cfg:
+                cfg["telemetry"] = {}
+            if "metrics" not in cfg["telemetry"]:
+                cfg["telemetry"]["metrics"] = {}
+            
+            # Get available metrics from state
+            state_payload = self.get_state_payload()
+            available_metrics = set(state_payload.keys()) if isinstance(state_payload, dict) else set()
+            
+            # Ensure all state metrics are present
+            for metric_name in available_metrics:
+                if metric_name not in cfg["telemetry"]["metrics"]:
+                    cfg["telemetry"]["metrics"][metric_name] = {
+                        "enabled": False,
+                        "interval_s": 2,
+                        "change_threshold_percent": 2.0,
+                    }
+                else:
+                    # Ensure metric config has all required fields
+                    metric_cfg = cfg["telemetry"]["metrics"][metric_name]
+                    if not isinstance(metric_cfg, dict):
+                        metric_cfg = {}
+                        cfg["telemetry"]["metrics"][metric_name] = metric_cfg
+                    if "enabled" not in metric_cfg:
+                        metric_cfg["enabled"] = False
+                    if "interval_s" not in metric_cfg:
+                        metric_cfg["interval_s"] = 2
+                    if "change_threshold_percent" not in metric_cfg:
+                        metric_cfg["change_threshold_percent"] = 2.0
+        
         self._publish_retained("cfg", cfg)
 
     def publish_log(self, level: str, message: str) -> None:
@@ -260,33 +289,58 @@ class Component:
         self._publish_json(topic, payload, retain=False, qos=1)
 
     def set_telemetry_config(self, cfg: Dict[str, Any]) -> None:
-        """Update telemetry config for gating: enabled, metrics, interval_s, change_threshold_percent."""
-        self._telemetry_cfg = {
-            "enabled": cfg.get("enabled", False),
-            "metrics": dict(cfg.get("metrics", {})),
-            "interval_s": int(cfg.get("interval_s", 2)),
-            "change_threshold_percent": float(cfg.get("change_threshold_percent", 2.0)),
-        }
+        """
+        Update telemetry config for gating.
+        Structure: { "metrics": { "metric_name": { "enabled": bool, "interval_s": int, "change_threshold_percent": float } } }
+        """
+        metrics = cfg.get("metrics", {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        
+        # Ensure each metric config has all required fields
+        normalized_metrics = {}
+        for metric_name, metric_cfg in metrics.items():
+            if isinstance(metric_cfg, dict):
+                normalized_metrics[metric_name] = {
+                    "enabled": bool(metric_cfg.get("enabled", False)),
+                    "interval_s": int(metric_cfg.get("interval_s", 2)),
+                    "change_threshold_percent": float(metric_cfg.get("change_threshold_percent", 2.0)),
+                }
+            elif isinstance(metric_cfg, bool):
+                # Backward compatibility: allow simple boolean
+                normalized_metrics[metric_name] = {
+                    "enabled": metric_cfg,
+                    "interval_s": 2,
+                    "change_threshold_percent": 2.0,
+                }
+        
+        self._telemetry_cfg = {"metrics": normalized_metrics}
 
     def should_publish_telemetry(self, metric: str, value: Any) -> bool:
         """
-        True if telemetry stream should be published: enabled, metric enabled,
-        and (delta > threshold or interval exceeded).
+        True if telemetry stream should be published based on per-metric config.
+        Checks: metric enabled, and (delta > threshold or interval exceeded).
         """
-        if not self._telemetry_cfg.get("enabled"):
-            return False
         metrics = self._telemetry_cfg.get("metrics") or {}
-        if not metrics.get(metric):
+        metric_cfg = metrics.get(metric)
+        if not isinstance(metric_cfg, dict):
             return False
-        interval_s = max(1, self._telemetry_cfg.get("interval_s", 2))
-        threshold = max(0.0, self._telemetry_cfg.get("change_threshold_percent", 2.0))
+        
+        if not metric_cfg.get("enabled", False):
+            return False
+        
+        interval_s = max(1, metric_cfg.get("interval_s", 2))
+        threshold = max(0.0, metric_cfg.get("change_threshold_percent", 2.0))
         now = time.time()
         last = self._telemetry_last.get(metric)
+        
         if last is None:
             return True
+        
         last_value, last_ts = last
         if now - last_ts >= interval_s:
             return True
+        
         try:
             if isinstance(last_value, (int, float)) and isinstance(value, (int, float)):
                 if last_value == 0:

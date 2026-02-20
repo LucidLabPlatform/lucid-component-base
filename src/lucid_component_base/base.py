@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
 from ._version import __version__
 from .context import ComponentContext
 
@@ -96,8 +98,15 @@ class Component:
 
     @property
     def version(self) -> str:
-        """Package version from installed package metadata."""
-        return __version__
+        """Package version from the component's installed package (the package containing the subclass)."""
+        try:
+            top_level = self.__class__.__module__.split(".")[0]
+            if top_level == "lucid_component_base":
+                return __version__
+            dist_name = top_level.replace("_", "-")
+            return _pkg_version(dist_name)
+        except PackageNotFoundError:
+            return __version__
 
     def metadata(self) -> Dict[str, Any]:
         """

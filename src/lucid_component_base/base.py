@@ -289,7 +289,10 @@ class Component:
             handler = MQTTLogHandler(self, self.context.topic("logs"))
             handler.setLevel(logging.DEBUG)  # Handler level, actual filtering done by logger level
             component_logger.addHandler(handler)
-            component_logger.setLevel(logging.NOTSET)  # Inherit from root logger
+            # Set logger level to DEBUG to ensure all logs reach the handler
+            # The handler will check logs_enabled flag to decide whether to publish
+            component_logger.setLevel(logging.DEBUG)
+            component_logger.propagate = False  # Don't propagate to root logger, use our handler only
             logger.debug("MQTT logging handler added for component %s", self.component_id)
         except Exception as exc:
             logger.warning("Failed to set up MQTT logging for component %s: %s", self.component_id, exc)

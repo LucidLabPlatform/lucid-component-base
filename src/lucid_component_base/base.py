@@ -85,6 +85,8 @@ class Component:
         self._state = ComponentState()
         self._telemetry_cfg: Dict[str, Any] = dict(self._DEFAULT_TELEMETRY_CFG)
         self._telemetry_last: Dict[str, tuple[Any, float]] = {}  # metric -> (value, last_publish_ts)
+        self._logs_enabled: bool = False  # Default: logs disabled
+        # MQTT logging will be set up after component_id is available (in start())
 
     @property
     def component_id(self) -> str:
@@ -119,6 +121,11 @@ class Component:
         return {}
 
     def start(self) -> None:
+        # Set up MQTT logging now that component_id is available
+        if not self._mqtt_logging_setup:
+            self._setup_mqtt_logging()
+            self._mqtt_logging_setup = True
+        
         if self._state.status == ComponentStatus.RUNNING:
             return
         if self._state.status in (ComponentStatus.STARTING, ComponentStatus.STOPPING):
@@ -206,6 +213,7 @@ class Component:
                     }
             
             cfg = {
+                "logs_enabled": self._logs_enabled,
                 "telemetry": {
                     "metrics": metrics_cfg,
                 },
@@ -241,6 +249,10 @@ class Component:
                         metric_cfg["interval_s"] = 2
                     if "change_threshold_percent" not in metric_cfg:
                         metric_cfg["change_threshold_percent"] = 2.0
+            
+            # Ensure logs_enabled is present
+            if "logs_enabled" not in cfg:
+                cfg["logs_enabled"] = self._logs_enabled
         
         self._publish_retained("cfg", cfg)
 
@@ -249,6 +261,28 @@ class Component:
         topic = self.context.topic("logs")
         payload = {"level": level, "message": message}
         self._publish_json(topic, payload, retain=False, qos=0)
+    
+    def _setup_mqtt_logging(self) -> None:
+        """Set up MQTT logging handler for component logs."""
+        try:
+            from lucid_component_base.mqtt_log_handler import MQTTLogHandler
+            
+            # Create a logger specific to this component
+            component_logger = logging.getLogger(f"lucid.component.{self.component_id}")
+            
+            # Only add handler if not already added
+            for handler in component_logger.handlers:
+                if isinstance(handler, MQTTLogHandler):
+                    return  # Already added
+            
+            # Create and add handler
+            handler = MQTTLogHandler(self, self.context.topic("logs"))
+            handler.setLevel(logging.DEBUG)  # Handler level, actual filtering done by logger level
+            component_logger.addHandler(handler)
+            component_logger.setLevel(logging.NOTSET)  # Inherit from root logger
+            logger.debug("MQTT logging handler added for component %s", self.component_id)
+        except Exception as exc:
+            logger.warning("Failed to set up MQTT logging for component %s: %s", self.component_id, exc)
 
     def publish_telemetry(self, metric: str, value: Any) -> None:
         """

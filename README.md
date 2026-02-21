@@ -28,29 +28,29 @@ Those responsibilities belong to `lucid-agent-core`.
 
 ---
 
-## Installation
+## Installation and build
 
-Editable install:
+Editable install (development):
 
 ```bash
 pip install -e .
 ```
 
-When building from a git-tagged release, the package version is derived from the git tag via `setuptools_scm`.
+Build wheel/sdist (for release):
+
+```bash
+pip install build
+python -m build
+```
+
+Package version is derived from the git tag via `setuptools_scm` (e.g. tag `v1.0.0` → version `1.0.0`).
 
 ---
 
 ## Versioning
 
-Package version is determined from the repository git tag at build time.
-
-The resolved version is available as:
-
-```python
-from lucid_component_base import __version__
-```
-
-The `Component.version` property returns this installed package version.
+- **lucid-component-base** itself: version from this repo’s git tag at build time, available as `lucid_component_base.__version__`.
+- **Component subclasses** (e.g. fixture_cpu): `Component.version` resolves the **component’s** installed package version (e.g. `lucid-component-fixture-cpu`) via `importlib.metadata`, so each component reports its own package version in metadata.
 
 ---
 

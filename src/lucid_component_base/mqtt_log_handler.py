@@ -5,18 +5,19 @@ Publishes log messages to MQTT /logs topic with rate limiting to prevent floodin
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
+import traceback
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 # Batching and rate limiting configuration
-MAX_LINES_PER_BATCH = 20  # Max log lines per MQTT message
-BATCH_INTERVAL_S = 0.5  # Publish batch every 0.5 seconds if not full
-MAX_BATCHES_PER_WINDOW = 5  # Max batches per time window
+MAX_LINES_PER_BATCH = 50  # Max log lines per MQTT message
+BATCH_INTERVAL_S = 0.25  # Publish batch every 0.25 seconds if not full
+MAX_BATCHES_PER_WINDOW = 25  # Max batches per time window
 TIME_WINDOW_S = 2.0  # 2 second window for rate limiting
 
 
@@ -44,7 +45,7 @@ class MQTTLogHandler(logging.Handler):
         
         # Batching state
         self._lock = threading.Lock()
-        self._buffer: list[dict[str, Any]] = []  # List of {level, message} dicts
+        self._buffer: list[dict[str, Any]] = []  # List of structured log line dicts
         self._last_publish_ts = time.time()
         self._batch_timer: Optional[threading.Timer] = None
         
@@ -52,33 +53,78 @@ class MQTTLogHandler(logging.Handler):
         self._batch_timestamps: list[float] = []  # Timestamps of published batches
         self._dropped_count = 0
         self._last_warning_ts = 0.0
+
+    @staticmethod
+    def _level_to_mqtt(levelno: int) -> str:
+        level_map = {
+            logging.DEBUG: "debug",
+            logging.INFO: "info",
+            logging.WARNING: "warning",
+            logging.ERROR: "error",
+            logging.CRITICAL: "error",
+        }
+        return level_map.get(levelno, "info")
+
+    @staticmethod
+    def _utc_iso_from_epoch(ts: float) -> str:
+        return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+
+    def _build_line(self, record: logging.LogRecord) -> dict[str, Any]:
+        message = record.getMessage()
+        line: dict[str, Any] = {
+            "ts": self._utc_iso_from_epoch(record.created),
+            "level": self._level_to_mqtt(record.levelno),
+            "logger": record.name,
+            "module": record.module,
+            "function": record.funcName,
+            "file": record.pathname,
+            "line": record.lineno,
+            "thread": record.threadName,
+            "process": record.processName,
+            "message": message,
+        }
+
+        formatted = self.format(record)
+        if formatted and formatted != message:
+            line["formatted"] = formatted
+
+        if record.exc_info:
+            try:
+                line["exception"] = "".join(traceback.format_exception(*record.exc_info)).strip()
+            except Exception:
+                pass
+        elif record.exc_text:
+            line["exception"] = str(record.exc_text)
+
+        if record.stack_info:
+            line["stack"] = str(record.stack_info)
+
+        return line
+
+    def _warn_rate_limit_drop(self, now: float) -> None:
+        if now - self._last_warning_ts < 10.0:
+            return
+        logger.warning(
+            "MQTT log handler dropped %d log lines due to rate limiting",
+            self._dropped_count,
+        )
+        self._dropped_count = 0
+        self._last_warning_ts = now
         
     def emit(self, record: logging.LogRecord) -> None:
         """Emit a log record - add to buffer and publish batch if needed."""
         try:
+            # Ignore handler-internal logs to avoid recursion.
+            if record.name == __name__:
+                return
+
             # Check if logs are enabled
             if not getattr(self.component, "_logs_enabled", False):
                 return  # Logs disabled, skip publishing
-            
-            # Map Python log levels to MQTT log levels
-            level_map = {
-                logging.DEBUG: "debug",
-                logging.INFO: "info",
-                logging.WARNING: "warning",
-                logging.ERROR: "error",
-                logging.CRITICAL: "error",
-            }
-            mqtt_level = level_map.get(record.levelno, "info")
-            
-            # Format message
-            message = self.format(record)
-            
+
             # Add to buffer
             with self._lock:
-                self._buffer.append({
-                    "level": mqtt_level,
-                    "message": message,
-                })
+                self._buffer.append(self._build_line(record))
                 
                 # If buffer is full, publish immediately
                 if len(self._buffer) >= MAX_LINES_PER_BATCH:
@@ -121,13 +167,7 @@ class MQTTLogHandler(logging.Handler):
             self._dropped_count += dropped
             
             # Warn occasionally
-            if now - self._last_warning_ts >= 10.0:
-                logger.warning(
-                    "MQTT log handler: dropped %d log lines due to rate limiting",
-                    self._dropped_count
-                )
-                self._dropped_count = 0
-                self._last_warning_ts = now
+            self._warn_rate_limit_drop(now)
             return
         
         # Copy buffer and clear it
@@ -145,6 +185,7 @@ class MQTTLogHandler(logging.Handler):
         
         # Publish batch using component's publish method
         payload = {
+            "count": len(batch),
             "lines": batch,
         }
         

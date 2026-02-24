@@ -87,7 +87,8 @@ class Component:
         self._state = ComponentState()
         self._telemetry_cfg: Dict[str, Any] = dict(self._DEFAULT_TELEMETRY_CFG)
         self._telemetry_last: Dict[str, tuple[Any, float]] = {}  # metric -> (value, last_publish_ts)
-        self._logs_enabled: bool = False  # Default: logs disabled
+        # Default to enabled for high-observability deployments.
+        self._logs_enabled: bool = True
         self._mqtt_logging_setup: bool = False  # Track if MQTT logging handler has been set up
         # MQTT logging will be set up after component_id is available (in start())
 

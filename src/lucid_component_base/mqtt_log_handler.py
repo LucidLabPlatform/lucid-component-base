@@ -70,23 +70,12 @@ class MQTTLogHandler(logging.Handler):
         return datetime.fromtimestamp(ts, timezone.utc).isoformat()
 
     def _build_line(self, record: logging.LogRecord) -> dict[str, Any]:
-        message = record.getMessage()
         line: dict[str, Any] = {
             "ts": self._utc_iso_from_epoch(record.created),
             "level": self._level_to_mqtt(record.levelno),
             "logger": record.name,
-            "module": record.module,
-            "function": record.funcName,
-            "file": record.pathname,
-            "line": record.lineno,
-            "thread": record.threadName,
-            "process": record.processName,
-            "message": message,
+            "message": record.getMessage(),
         }
-
-        formatted = self.format(record)
-        if formatted and formatted != message:
-            line["formatted"] = formatted
 
         if record.exc_info:
             try:
@@ -95,9 +84,6 @@ class MQTTLogHandler(logging.Handler):
                 pass
         elif record.exc_text:
             line["exception"] = str(record.exc_text)
-
-        if record.stack_info:
-            line["stack"] = str(record.stack_info)
 
         return line
 
@@ -117,10 +103,6 @@ class MQTTLogHandler(logging.Handler):
             # Ignore handler-internal logs to avoid recursion.
             if record.name == __name__:
                 return
-
-            # Check if logs are enabled
-            if not getattr(self.component, "_logs_enabled", False):
-                return  # Logs disabled, skip publishing
 
             # Add to buffer
             with self._lock:

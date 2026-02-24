@@ -36,11 +36,6 @@ def _context() -> ComponentContext:
     )
 
 
-def test_component_logs_enabled_by_default():
-    comp = _DummyComponent(_context())
-    assert comp._logs_enabled is True
-
-
 def test_component_mqtt_log_handler_publishes_structured_lines():
     comp = _DummyComponent(_context())
     calls: list[tuple[str, dict]] = []
@@ -49,7 +44,7 @@ def test_component_mqtt_log_handler_publishes_structured_lines():
 
     record = logging.LogRecord(
         name="lucid.component.dummy",
-        level=logging.INFO,
+        level=logging.ERROR,
         pathname=__file__,
         lineno=48,
         msg="component %s",
@@ -65,31 +60,9 @@ def test_component_mqtt_log_handler_publishes_structured_lines():
     payload = calls[0][1]
     assert payload["count"] == 1
     line = payload["lines"][0]
-    assert line["level"] == "info"
+    assert line["level"] == "error"
     assert line["message"] == "component up"
-    for key in ("ts", "logger", "module", "function", "file", "line", "thread", "process"):
+    for key in ("ts", "logger"):
         assert key in line
-
-
-def test_component_mqtt_log_handler_skips_when_logs_disabled():
-    comp = _DummyComponent(_context())
-    comp._logs_enabled = False
-    calls: list[tuple[str, dict]] = []
-    comp._publish_json = lambda topic, payload, **kwargs: calls.append((topic, payload))
-    handler = MQTTLogHandler(comp, "lucid/agents/agent_1/components/dummy/logs")
-
-    record = logging.LogRecord(
-        name="lucid.component.dummy",
-        level=logging.WARNING,
-        pathname=__file__,
-        lineno=80,
-        msg="skip me",
-        args=(),
-        exc_info=None,
-        func="test_fn",
-        sinfo=None,
-    )
-    handler.emit(record)
-    handler._publish_batch()
-
-    assert calls == []
+    for key in ("module", "function", "file", "line", "thread", "process", "stack", "formatted"):
+        assert key not in line

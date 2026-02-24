@@ -87,8 +87,7 @@ class Component:
         self._state = ComponentState()
         self._telemetry_cfg: Dict[str, Any] = dict(self._DEFAULT_TELEMETRY_CFG)
         self._telemetry_last: Dict[str, tuple[Any, float]] = {}  # metric -> (value, last_publish_ts)
-        # Default to enabled for high-observability deployments.
-        self._logs_enabled: bool = True
+        self._log_level: str = "ERROR"
         self._mqtt_logging_setup: bool = False  # Track if MQTT logging handler has been set up
         # MQTT logging will be set up after component_id is available (in start())
 
@@ -129,6 +128,14 @@ class Component:
 
     def get_state_payload(self) -> Dict[str, Any]:
         """Current state for retained state topic. Override in subclasses. Contract: { "<metric>": value }."""
+        return {}
+
+    def get_cfg_payload(self) -> Dict[str, Any]:
+        """
+        Component-specific hardware/operational settings for the cfg topic.
+        Override in subclasses that have configurable hardware settings.
+        Returns empty dict by default (e.g. fixture_cpu has no hardware settings).
+        """
         return {}
 
     def start(self) -> None:
@@ -193,53 +200,49 @@ class Component:
 
     def publish_cfg(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         """
-        Publish retained cfg.
-        Contract: { logs_enabled, telemetry: { metrics: { metric_name: { enabled, interval_s, change_threshold_percent } } } }.
-        If cfg is None, builds from the current telemetry config (_telemetry_cfg). Only metrics that have been
-        explicitly registered via set_telemetry_config() appear in telemetry.metrics — state keys are NOT
-        automatically promoted to metrics.
+        Publish all three retained cfg sub-topics: cfg, cfg/logging, cfg/telemetry.
+
+        cfg         → component-specific hardware/operational settings (subclass provides via get_cfg_payload())
+        cfg/logging → {log_level}
+        cfg/telemetry → flat metric dict {metric_name: {enabled, interval_s, change_threshold_percent}}
+
+        Only metrics explicitly registered via set_telemetry_config() appear in cfg/telemetry.
         """
-        if cfg is None:
-            # Only expose metrics that were explicitly registered via set_telemetry_config().
-            # State payload keys are NOT automatically treated as telemetry metrics.
-            current_metrics = self._telemetry_cfg.get("metrics", {})
-            metrics_cfg: Dict[str, Any] = {}
-            for metric_name, metric_cfg in current_metrics.items():
-                if isinstance(metric_cfg, dict):
-                    metrics_cfg[metric_name] = {
-                        "enabled": bool(metric_cfg.get("enabled", False)),
-                        "interval_s": int(metric_cfg.get("interval_s", 2)),
-                        "change_threshold_percent": float(metric_cfg.get("change_threshold_percent", 2.0)),
-                    }
+        # cfg — component hardware/operational settings
+        hardware_cfg = self.get_cfg_payload() if cfg is None else cfg
+        self._publish_retained("cfg", hardware_cfg)
 
-            cfg = {
-                "logs_enabled": self._logs_enabled,
-                "telemetry": {
-                    "metrics": metrics_cfg,
-                },
-            }
-        else:
-            if "logs_enabled" not in cfg:
-                cfg["logs_enabled"] = self._logs_enabled
-            if "telemetry" not in cfg:
-                cfg["telemetry"] = {}
-            if "metrics" not in cfg["telemetry"]:
-                cfg["telemetry"]["metrics"] = {}
-            # Normalise any metrics already present in the provided cfg
-            for metric_name, metric_cfg in cfg["telemetry"]["metrics"].items():
-                if not isinstance(metric_cfg, dict):
-                    cfg["telemetry"]["metrics"][metric_name] = {
-                        "enabled": False, "interval_s": 2, "change_threshold_percent": 2.0,
-                    }
-                else:
-                    if "enabled" not in metric_cfg:
-                        metric_cfg["enabled"] = False
-                    if "interval_s" not in metric_cfg:
-                        metric_cfg["interval_s"] = 2
-                    if "change_threshold_percent" not in metric_cfg:
-                        metric_cfg["change_threshold_percent"] = 2.0
+        # cfg/logging
+        logging_cfg: Dict[str, Any] = {
+            "log_level": self._log_level,
+        }
+        self._publish_retained("cfg/logging", logging_cfg)
 
-        self._publish_retained("cfg", cfg)
+        # cfg/telemetry — flat metric dict
+        current_metrics = self._telemetry_cfg.get("metrics", {})
+        telemetry_cfg: Dict[str, Any] = {}
+        for metric_name, metric_cfg in current_metrics.items():
+            if isinstance(metric_cfg, dict):
+                telemetry_cfg[metric_name] = {
+                    "enabled": bool(metric_cfg.get("enabled", False)),
+                    "interval_s": int(metric_cfg.get("interval_s", 2)),
+                    "change_threshold_percent": float(metric_cfg.get("change_threshold_percent", 2.0)),
+                }
+        self._publish_retained("cfg/telemetry", telemetry_cfg)
+
+    def apply_log_level(self, level: str) -> None:
+        """
+        Apply log level to this component's logger scope.
+        Affects logging.getLogger("lucid.component.<component_id>") only — not the root logger.
+        """
+        import logging as _logging
+        valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        level_upper = level.strip().upper()
+        if level_upper not in valid:
+            logger.warning("Invalid log_level %r for component %s, ignoring", level, self.component_id)
+            return
+        self._log_level = level_upper
+        _logging.getLogger(f"lucid.component.{self.component_id}").setLevel(level_upper)
 
     def publish_log(self, level: str, message: str) -> None:
         """Publish logs stream. level: debug|info|warning|error."""
@@ -262,11 +265,9 @@ class Component:
             
             # Create and add handler
             handler = MQTTLogHandler(self, self.context.topic("logs"))
-            handler.setLevel(logging.DEBUG)  # Handler level, actual filtering done by logger level
+            handler.setLevel(logging.DEBUG)  # Handler level; filtering done by logger level
             component_logger.addHandler(handler)
-            # Set logger level to DEBUG to ensure all logs reach the handler
-            # The handler will check logs_enabled flag to decide whether to publish
-            component_logger.setLevel(logging.DEBUG)
+            component_logger.setLevel(logging.ERROR)
             component_logger.propagate = False  # Don't propagate to root logger, use our handler only
             logger.debug("MQTT logging handler added for component %s", self.component_id)
         except Exception as exc:

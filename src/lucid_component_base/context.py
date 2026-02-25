@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Dict, Protocol
 
 
 class MqttPublisher(Protocol):
@@ -37,7 +37,7 @@ class ComponentContext:
     base_topic: str
     component_id: str
     mqtt: MqttPublisher
-    config: object
+    config: Dict[str, Any]
 
     def topic(self, suffix: str) -> str:
         """Build component-scoped topic: {base_topic}/components/{component_id}/{suffix}."""
@@ -54,7 +54,7 @@ class ComponentContext:
         base_topic: str,
         component_id: str,
         mqtt: MqttPublisher,
-        config: object,
+        config: Dict[str, Any],
     ) -> "ComponentContext":
         if not isinstance(agent_id, str) or not agent_id:
             raise ValueError("agent_id must be a non-empty string")
@@ -62,6 +62,8 @@ class ComponentContext:
             raise ValueError("base_topic must be a non-empty string")
         if not isinstance(component_id, str) or not component_id:
             raise ValueError("component_id must be a non-empty string")
+        if not isinstance(config, dict):
+            raise ValueError("config must be a dict")
         return ComponentContext(
             agent_id=agent_id,
             base_topic=base_topic,

@@ -77,10 +77,8 @@ class Component:
     """
 
     # Default telemetry config; override via set_telemetry_config()
-    # Structure: { "metrics": { "metric_name": { "enabled": bool, "interval_s": int, "change_threshold_percent": float } } }
-    _DEFAULT_TELEMETRY_CFG: Dict[str, Any] = {
-        "metrics": {},
-    }
+    # Structure: { "metric_name": { "enabled": bool, "interval_s": int, "change_threshold_percent": float } }
+    _DEFAULT_TELEMETRY_CFG: Dict[str, Any] = {}
 
     def __init__(self, context: ComponentContext) -> None:
         self.context = context
@@ -219,16 +217,7 @@ class Component:
         self._publish_retained("cfg/logging", logging_cfg)
 
         # cfg/telemetry — flat metric dict
-        current_metrics = self._telemetry_cfg.get("metrics", {})
-        telemetry_cfg: Dict[str, Any] = {}
-        for metric_name, metric_cfg in current_metrics.items():
-            if isinstance(metric_cfg, dict):
-                telemetry_cfg[metric_name] = {
-                    "enabled": bool(metric_cfg.get("enabled", False)),
-                    "interval_s": int(metric_cfg.get("interval_s", 2)),
-                    "change_threshold_percent": float(metric_cfg.get("change_threshold_percent", 2.0)),
-                }
-        self._publish_retained("cfg/telemetry", telemetry_cfg)
+        self._publish_retained("cfg/telemetry", self._telemetry_cfg)
 
     def apply_log_level(self, level: str) -> None:
         """
@@ -314,38 +303,34 @@ class Component:
     def set_telemetry_config(self, cfg: Dict[str, Any]) -> None:
         """
         Update telemetry config for gating.
-        Structure: { "metrics": { "metric_name": { "enabled": bool, "interval_s": int, "change_threshold_percent": float } } }
+        Structure: { "metric_name": { "enabled": bool, "interval_s": int, "change_threshold_percent": float } }
         """
-        metrics = cfg.get("metrics", {})
-        if not isinstance(metrics, dict):
-            metrics = {}
-        
-        # Ensure each metric config has all required fields
-        normalized_metrics = {}
-        for metric_name, metric_cfg in metrics.items():
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        normalized: Dict[str, Any] = {}
+        for metric_name, metric_cfg in cfg.items():
             if isinstance(metric_cfg, dict):
-                normalized_metrics[metric_name] = {
+                normalized[metric_name] = {
                     "enabled": bool(metric_cfg.get("enabled", False)),
                     "interval_s": int(metric_cfg.get("interval_s", 2)),
                     "change_threshold_percent": float(metric_cfg.get("change_threshold_percent", 2.0)),
                 }
             elif isinstance(metric_cfg, bool):
-                # Backward compatibility: allow simple boolean
-                normalized_metrics[metric_name] = {
+                normalized[metric_name] = {
                     "enabled": metric_cfg,
                     "interval_s": 2,
                     "change_threshold_percent": 2.0,
                 }
-        
-        self._telemetry_cfg = {"metrics": normalized_metrics}
+
+        self._telemetry_cfg = normalized
 
     def should_publish_telemetry(self, metric: str, value: Any) -> bool:
         """
         True if telemetry stream should be published based on per-metric config.
         Checks: metric enabled, and (delta > threshold or interval exceeded).
         """
-        metrics = self._telemetry_cfg.get("metrics") or {}
-        metric_cfg = metrics.get(metric)
+        metric_cfg = self._telemetry_cfg.get(metric)
         if not isinstance(metric_cfg, dict):
             return False
         

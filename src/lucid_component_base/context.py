@@ -4,6 +4,7 @@ Component context — shared runtime passed to all components.
 Provides agent_id, base_topic, component_id, MQTT publisher, config, and a topic() helper.
 Unified contract: topics under lucid/agents/<agent_id>/components/<component_id>/.
 """
+
 from __future__ import annotations
 
 import logging

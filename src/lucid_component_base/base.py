@@ -5,15 +5,17 @@ Unified MQTT contract: retained metadata, status, state, cfg;
 stream logs, telemetry/<metric>; commands cmd/reset, cmd/ping, cmd/cfg/set;
 results evt/<action>/result.
 """
+
 from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
@@ -84,10 +86,16 @@ class Component:
         self.context = context
         self._state = ComponentState()
         self._telemetry_cfg: Dict[str, Any] = dict(self._DEFAULT_TELEMETRY_CFG)
-        self._telemetry_last: Dict[str, tuple[Any, float]] = {}  # metric -> (value, last_publish_ts)
+        self._telemetry_last: Dict[
+            str, tuple[Any, float]
+        ] = {}  # metric -> (value, last_publish_ts)
         self._log_level: str = "ERROR"
-        self._mqtt_logging_setup: bool = False  # Track if MQTT logging handler has been set up
+        self._mqtt_logging_setup: bool = (
+            False  # Track if MQTT logging handler has been set up
+        )
         # MQTT logging will be set up after component_id is available (in start())
+        self._seen_request_ids: Dict[str, set] = {}
+        self._seen_request_ids_lock = threading.Lock()
 
     @property
     def component_id(self) -> str:
@@ -141,11 +149,13 @@ class Component:
         if not self._mqtt_logging_setup:
             self._setup_mqtt_logging()
             self._mqtt_logging_setup = True
-        
+
         if self._state.status == ComponentStatus.RUNNING:
             return
         if self._state.status in (ComponentStatus.STARTING, ComponentStatus.STOPPING):
-            raise RuntimeError(f"Cannot start component in state: {self._state.status.value}")
+            raise RuntimeError(
+                f"Cannot start component in state: {self._state.status.value}"
+            )
 
         self._set_state(ComponentStatus.STARTING)
 
@@ -193,7 +203,9 @@ class Component:
 
     def publish_state(self, state_payload: Optional[Dict[str, Any]] = None) -> None:
         """Publish retained state. Contract: { "<metric>": value }. Uses get_state_payload() if None."""
-        payload = state_payload if state_payload is not None else self.get_state_payload()
+        payload = (
+            state_payload if state_payload is not None else self.get_state_payload()
+        )
         self._publish_retained("state", payload)
 
     def publish_cfg(self, cfg: Optional[Dict[str, Any]] = None) -> None:
@@ -225,10 +237,15 @@ class Component:
         Affects logging.getLogger("lucid.component.<component_id>") only — not the root logger.
         """
         import logging as _logging
+
         valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         level_upper = level.strip().upper()
         if level_upper not in valid:
-            logger.warning("Invalid log_level %r for component %s, ignoring", level, self.component_id)
+            logger.warning(
+                "Invalid log_level %r for component %s, ignoring",
+                level,
+                self.component_id,
+            )
             return
         self._log_level = level_upper
         _logging.getLogger(f"lucid.component.{self.component_id}").setLevel(level_upper)
@@ -238,29 +255,39 @@ class Component:
         topic = self.context.topic("logs")
         payload = {"level": level, "message": message}
         self._publish_json(topic, payload, retain=False, qos=0)
-    
+
     def _setup_mqtt_logging(self) -> None:
         """Set up MQTT logging handler for component logs."""
         try:
             from lucid_component_base.mqtt_log_handler import MQTTLogHandler
-            
+
             # Create a logger specific to this component
             component_logger = logging.getLogger(f"lucid.component.{self.component_id}")
-            
+
             # Only add handler if not already added
             for handler in component_logger.handlers:
                 if isinstance(handler, MQTTLogHandler):
                     return  # Already added
-            
+
             # Create and add handler
             handler = MQTTLogHandler(self, self.context.topic("logs"))
-            handler.setLevel(logging.DEBUG)  # Handler level; filtering done by logger level
+            handler.setLevel(
+                logging.DEBUG
+            )  # Handler level; filtering done by logger level
             component_logger.addHandler(handler)
             component_logger.setLevel(logging.ERROR)
-            component_logger.propagate = False  # Don't propagate to root logger, use our handler only
-            logger.debug("MQTT logging handler added for component %s", self.component_id)
+            component_logger.propagate = (
+                False  # Don't propagate to root logger, use our handler only
+            )
+            logger.debug(
+                "MQTT logging handler added for component %s", self.component_id
+            )
         except Exception as exc:
-            logger.warning("Failed to set up MQTT logging for component %s: %s", self.component_id, exc)
+            logger.warning(
+                "Failed to set up MQTT logging for component %s: %s",
+                self.component_id,
+                exc,
+            )
 
     def publish_telemetry(self, metric: str, value: Any) -> None:
         """
@@ -275,7 +302,9 @@ class Component:
         self._publish_json(topic, payload, retain=False, qos=0)
         self._telemetry_last[metric] = (value, time.time())
 
-    def publish_result(self, action: str, request_id: str, ok: bool, error: Optional[str] = None) -> None:
+    def publish_result(
+        self, action: str, request_id: str, ok: bool, error: Optional[str] = None
+    ) -> None:
         """Publish evt/<action>/result. Contract: { request_id, ok, error }."""
         topic = self.context.topic(f"evt/{action}/result")
         payload = {"request_id": request_id, "ok": ok, "error": error}
@@ -314,7 +343,9 @@ class Component:
                 normalized[metric_name] = {
                     "enabled": bool(metric_cfg.get("enabled", False)),
                     "interval_s": int(metric_cfg.get("interval_s", 2)),
-                    "change_threshold_percent": float(metric_cfg.get("change_threshold_percent", 2.0)),
+                    "change_threshold_percent": float(
+                        metric_cfg.get("change_threshold_percent", 2.0)
+                    ),
                 }
             elif isinstance(metric_cfg, bool):
                 normalized[metric_name] = {
@@ -333,22 +364,22 @@ class Component:
         metric_cfg = self._telemetry_cfg.get(metric)
         if not isinstance(metric_cfg, dict):
             return False
-        
+
         if not metric_cfg.get("enabled", False):
             return False
-        
+
         interval_s = max(1, metric_cfg.get("interval_s", 2))
         threshold = max(0.0, metric_cfg.get("change_threshold_percent", 2.0))
         now = time.time()
         last = self._telemetry_last.get(metric)
-        
+
         if last is None:
             return True
-        
+
         last_value, last_ts = last
         if now - last_ts >= interval_s:
             return True
-        
+
         try:
             if isinstance(last_value, (int, float)) and isinstance(value, (int, float)):
                 if last_value == 0:
@@ -359,11 +390,45 @@ class Component:
             pass
         return value != last_value
 
+    def _make_cmd_handler(self, action: str, method: Callable) -> Callable[[str], None]:
+        """Wrap a command handler with per-action request_id deduplication.
+
+        Duplicate request_ids are rejected: a failure result is published and the
+        handler is not invoked. Empty / missing request_ids bypass deduplication.
+        """
+
+        def handler(payload_str: str) -> None:
+            try:
+                obj = json.loads(payload_str) if payload_str else {}
+                request_id = obj.get("request_id", "") if isinstance(obj, dict) else ""
+            except json.JSONDecodeError:
+                request_id = ""
+            if request_id:
+                with self._seen_request_ids_lock:
+                    seen = self._seen_request_ids.setdefault(action, set())
+                    if request_id in seen:
+                        logger.warning(
+                            "Duplicate request_id=%s rejected for component=%s action=%s",
+                            request_id,
+                            self.component_id,
+                            action,
+                        )
+                        self.publish_result(
+                            action, request_id, ok=False, error="duplicate request_id"
+                        )
+                        return
+                    seen.add(request_id)
+            method(payload_str)
+
+        return handler
+
     def _publish_retained(self, suffix: str, payload: Dict[str, Any]) -> None:
         topic = self.context.topic(suffix)
         self._publish_json(topic, payload, retain=True, qos=1)
 
-    def _publish_json(self, topic: str, payload: Dict[str, Any], *, retain: bool = False, qos: int = 0) -> None:
+    def _publish_json(
+        self, topic: str, payload: Dict[str, Any], *, retain: bool = False, qos: int = 0
+    ) -> None:
         try:
             body = json.dumps(payload)
         except (TypeError, ValueError) as e:
@@ -386,4 +451,3 @@ class Component:
         logger.debug("Component %s state=%s", self.component_id, status.value)
         # Keep MQTT status topic in sync (e.g. "running" after auto-start)
         self.publish_status()
-  

@@ -2,7 +2,8 @@
 Component base class and lifecycle state.
 
 Unified MQTT contract: retained metadata, status, state, cfg;
-stream logs, telemetry/<metric>; commands cmd/reset, cmd/ping, cmd/cfg/set;
+stream logs, telemetry/<metric>; commands cmd/reset, cmd/ping,
+cmd/cfg/set, cmd/cfg/logging/set, cmd/cfg/telemetry/set;
 results evt/<action>/result.
 """
 
@@ -208,6 +209,20 @@ class Component:
         )
         self._publish_retained("state", payload)
 
+    def publish_cfg_general(self, cfg: Optional[Dict[str, Any]] = None) -> None:
+        """Publish retained cfg (general/hardware settings)."""
+        hardware_cfg = self.get_cfg_payload() if cfg is None else cfg
+        self._publish_retained("cfg", hardware_cfg)
+
+    def publish_cfg_logging(self) -> None:
+        """Publish retained cfg/logging."""
+        logging_cfg: Dict[str, Any] = {"log_level": self._log_level}
+        self._publish_retained("cfg/logging", logging_cfg)
+
+    def publish_cfg_telemetry(self) -> None:
+        """Publish retained cfg/telemetry."""
+        self._publish_retained("cfg/telemetry", self._telemetry_cfg)
+
     def publish_cfg(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         """
         Publish all three retained cfg sub-topics: cfg, cfg/logging, cfg/telemetry.
@@ -218,18 +233,9 @@ class Component:
 
         Only metrics explicitly registered via set_telemetry_config() appear in cfg/telemetry.
         """
-        # cfg — component hardware/operational settings
-        hardware_cfg = self.get_cfg_payload() if cfg is None else cfg
-        self._publish_retained("cfg", hardware_cfg)
-
-        # cfg/logging
-        logging_cfg: Dict[str, Any] = {
-            "log_level": self._log_level,
-        }
-        self._publish_retained("cfg/logging", logging_cfg)
-
-        # cfg/telemetry — flat metric dict
-        self._publish_retained("cfg/telemetry", self._telemetry_cfg)
+        self.publish_cfg_general(cfg)
+        self.publish_cfg_logging()
+        self.publish_cfg_telemetry()
 
     def apply_log_level(self, level: str) -> None:
         """
@@ -317,9 +323,10 @@ class Component:
         applied: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
         ts: Optional[str] = None,
+        action: str = "cfg/set",
     ) -> None:
-        """Publish evt/cfg/set/result. Contract: { request_id, ok, applied, error, ts }."""
-        topic = self.context.topic("evt/cfg/set/result")
+        """Publish evt/<cfg-action>/result. Contract: { request_id, ok, applied, error, ts }."""
+        topic = self.context.topic(f"evt/{action}/result")
         payload = {
             "request_id": request_id,
             "ok": ok,
@@ -328,6 +335,119 @@ class Component:
             "ts": ts if ts is not None else _utc_iso(),
         }
         self._publish_json(topic, payload, retain=False, qos=1)
+
+    def _parse_cfg_set_payload(
+        self, payload_str: str
+    ) -> tuple[str, dict[str, Any], Optional[str]]:
+        try:
+            payload = json.loads(payload_str) if payload_str else {}
+        except json.JSONDecodeError:
+            return "", {}, "invalid JSON"
+        request_id = payload.get("request_id", "") if isinstance(payload, dict) else ""
+        set_dict = payload.get("set") if isinstance(payload, dict) else None
+        if set_dict is None:
+            return request_id, {}, "missing 'set' field in payload"
+        if not isinstance(set_dict, dict):
+            return request_id, {}, "payload 'set' must be an object"
+        return request_id, set_dict, None
+
+    def on_cmd_cfg_logging_set(self, payload_str: str) -> None:
+        """Handle cmd/cfg/logging/set → evt/cfg/logging/set/result."""
+        request_id, set_dict, parse_error = self._parse_cfg_set_payload(payload_str)
+        if parse_error:
+            self.publish_cfg_set_result(
+                request_id=request_id,
+                ok=False,
+                applied=None,
+                error=parse_error,
+                ts=_utc_iso(),
+                action="cfg/logging/set",
+            )
+            return
+
+        unknown = sorted(k for k in set_dict.keys() if k != "log_level")
+        if unknown:
+            self.publish_cfg_set_result(
+                request_id=request_id,
+                ok=False,
+                applied=None,
+                error=f"unknown logging key(s): {', '.join(unknown)}",
+                ts=_utc_iso(),
+                action="cfg/logging/set",
+            )
+            return
+
+        applied: Dict[str, Any] = {}
+        if "log_level" in set_dict:
+            self.apply_log_level(str(set_dict["log_level"]))
+            applied["log_level"] = self._log_level
+
+        self.publish_cfg_logging()
+        self.publish_cfg_set_result(
+            request_id=request_id,
+            ok=True,
+            applied=applied if applied else None,
+            error=None,
+            ts=_utc_iso(),
+            action="cfg/logging/set",
+        )
+
+    def on_cmd_cfg_telemetry_set(self, payload_str: str) -> None:
+        """Handle cmd/cfg/telemetry/set → evt/cfg/telemetry/set/result."""
+        request_id, set_dict, parse_error = self._parse_cfg_set_payload(payload_str)
+        if parse_error:
+            self.publish_cfg_set_result(
+                request_id=request_id,
+                ok=False,
+                applied=None,
+                error=parse_error,
+                ts=_utc_iso(),
+                action="cfg/telemetry/set",
+            )
+            return
+
+        merged = dict(self._telemetry_cfg)
+        for metric_name, metric_cfg in set_dict.items():
+            if isinstance(metric_cfg, bool):
+                metric_cfg = {"enabled": metric_cfg}
+            if not isinstance(metric_cfg, dict):
+                self.publish_cfg_set_result(
+                    request_id=request_id,
+                    ok=False,
+                    applied=None,
+                    error=f"telemetry metric '{metric_name}' must be an object or boolean",
+                    ts=_utc_iso(),
+                    action="cfg/telemetry/set",
+                )
+                return
+
+            existing = merged.get(metric_name, {})
+            if not isinstance(existing, dict):
+                existing = {}
+            merged[metric_name] = {**existing, **metric_cfg}
+
+        try:
+            self.set_telemetry_config(merged)
+        except Exception as exc:
+            self.publish_cfg_set_result(
+                request_id=request_id,
+                ok=False,
+                applied=None,
+                error=str(exc),
+                ts=_utc_iso(),
+                action="cfg/telemetry/set",
+            )
+            return
+
+        self.publish_cfg_telemetry()
+        self.publish_cfg_set_result(
+            request_id=request_id,
+            ok=True,
+            applied=set_dict if set_dict else None,
+            error=None,
+            ts=_utc_iso(),
+            action="cfg/telemetry/set",
+        )
 
     def set_telemetry_config(self, cfg: Dict[str, Any]) -> None:
         """

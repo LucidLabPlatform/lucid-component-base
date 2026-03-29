@@ -13,6 +13,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -65,6 +66,34 @@ class ComponentState:
         }
 
 
+_DEDUP_MAXSIZE = 10_000
+
+
+class _BoundedSet:
+    """Ordered set with a fixed capacity.
+
+    When the cap is reached the oldest entry is evicted before the new one
+    is inserted, keeping memory bounded on long-running agents.
+    """
+
+    def __init__(self, maxsize: int = _DEDUP_MAXSIZE) -> None:
+        self._maxsize = maxsize
+        self._queue: deque[str] = deque()
+        self._seen: set[str] = set()
+
+    def __contains__(self, item: str) -> bool:
+        return item in self._seen
+
+    def add(self, item: str) -> None:
+        if item in self._seen:
+            return
+        if len(self._queue) >= self._maxsize:
+            oldest = self._queue.popleft()
+            self._seen.discard(oldest)
+        self._queue.append(item)
+        self._seen.add(item)
+
+
 class Component:
     """
     Base class for all LUCID components.
@@ -95,8 +124,9 @@ class Component:
             False  # Track if MQTT logging handler has been set up
         )
         # MQTT logging will be set up after component_id is available (in start())
-        self._seen_request_ids: Dict[str, set] = {}
+        self._seen_request_ids: Dict[str, _BoundedSet] = {}
         self._seen_request_ids_lock = threading.Lock()
+        self._telemetry_last_lock = threading.Lock()
 
     @property
     def component_id(self) -> str:
@@ -184,8 +214,29 @@ class Component:
             self._set_state(ComponentStatus.STOPPED)
         except Exception as exc:
             self._state.last_error = str(exc)
+            self._state.stopped_at = _utc_iso()  # always record when stop was attempted
             self._set_state(ComponentStatus.FAILED)
             raise
+        finally:
+            self._teardown_mqtt_logging()
+
+    def _teardown_mqtt_logging(self) -> None:
+        """Remove and close the MQTTLogHandler attached to this component's logger."""
+        try:
+            from lucid_component_base.mqtt_log_handler import MQTTLogHandler
+
+            component_logger = logging.getLogger(f"lucid.component.{self.component_id}")
+            for handler in list(component_logger.handlers):
+                if isinstance(handler, MQTTLogHandler):
+                    component_logger.removeHandler(handler)
+                    handler.close()
+            self._mqtt_logging_setup = False
+        except Exception as exc:
+            logger.warning(
+                "Failed to tear down MQTT logging for component %s: %s",
+                self.component_id,
+                exc,
+            )
 
     # -------------------------
     # Unified MQTT publishing
@@ -275,8 +326,12 @@ class Component:
                 if isinstance(handler, MQTTLogHandler):
                     return  # Already added
 
-            # Create and add handler
-            handler = MQTTLogHandler(self, self.context.topic("logs"))
+            # Create and add handler — pass a publish callable rather than self
+            # so the handler has no dependency on Component internals.
+            def _publish(topic: str, payload: Dict[str, Any]) -> None:
+                self._publish_json(topic, payload, retain=False, qos=0)
+
+            handler = MQTTLogHandler(_publish, self.context.topic("logs"))
             handler.setLevel(
                 logging.DEBUG
             )  # Handler level; filtering done by logger level
@@ -306,7 +361,8 @@ class Component:
         topic = self.context.topic(f"telemetry/{metric}")
         payload = {"value": value}
         self._publish_json(topic, payload, retain=False, qos=0)
-        self._telemetry_last[metric] = (value, time.time())
+        with self._telemetry_last_lock:
+            self._telemetry_last[metric] = (value, time.time())
 
     def publish_result(
         self, action: str, request_id: str, ok: bool, error: Optional[str] = None
@@ -453,25 +509,42 @@ class Component:
         """
         Update telemetry config for gating.
         Structure: { "metric_name": { "enabled": bool, "interval_s": int, "change_threshold_percent": float } }
+
+        Raises ValueError if any numeric field is non-numeric or out of range.
+        Validates all metrics before applying any change so state stays consistent.
         """
         if not isinstance(cfg, dict):
             cfg = {}
 
         normalized: Dict[str, Any] = {}
         for metric_name, metric_cfg in cfg.items():
-            if isinstance(metric_cfg, dict):
-                normalized[metric_name] = {
-                    "enabled": bool(metric_cfg.get("enabled", False)),
-                    "interval_s": int(metric_cfg.get("interval_s", 2)),
-                    "change_threshold_percent": float(
-                        metric_cfg.get("change_threshold_percent", 2.0)
-                    ),
-                }
-            elif isinstance(metric_cfg, bool):
+            if isinstance(metric_cfg, bool):
                 normalized[metric_name] = {
                     "enabled": metric_cfg,
                     "interval_s": 2,
                     "change_threshold_percent": 2.0,
+                }
+            elif isinstance(metric_cfg, dict):
+                interval_raw = metric_cfg.get("interval_s", 2)
+                threshold_raw = metric_cfg.get("change_threshold_percent", 2.0)
+
+                if not isinstance(interval_raw, (int, float)) or isinstance(interval_raw, bool):
+                    raise ValueError(
+                        f"telemetry metric '{metric_name}': interval_s must be a number, got {interval_raw!r}"
+                    )
+                if interval_raw <= 0:
+                    raise ValueError(
+                        f"telemetry metric '{metric_name}': interval_s must be positive, got {interval_raw}"
+                    )
+                if not isinstance(threshold_raw, (int, float)) or isinstance(threshold_raw, bool):
+                    raise ValueError(
+                        f"telemetry metric '{metric_name}': change_threshold_percent must be a number, got {threshold_raw!r}"
+                    )
+
+                normalized[metric_name] = {
+                    "enabled": bool(metric_cfg.get("enabled", False)),
+                    "interval_s": int(interval_raw),
+                    "change_threshold_percent": float(threshold_raw),
                 }
 
         self._telemetry_cfg = normalized
@@ -491,7 +564,8 @@ class Component:
         interval_s = max(1, metric_cfg.get("interval_s", 2))
         threshold = max(0.0, metric_cfg.get("change_threshold_percent", 2.0))
         now = time.time()
-        last = self._telemetry_last.get(metric)
+        with self._telemetry_last_lock:
+            last = self._telemetry_last.get(metric)
 
         if last is None:
             return True
@@ -525,7 +599,7 @@ class Component:
                 request_id = ""
             if request_id:
                 with self._seen_request_ids_lock:
-                    seen = self._seen_request_ids.setdefault(action, set())
+                    seen = self._seen_request_ids.setdefault(action, _BoundedSet())
                     if request_id in seen:
                         logger.warning(
                             "Duplicate request_id=%s rejected for component=%s action=%s",

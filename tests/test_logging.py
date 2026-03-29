@@ -40,7 +40,10 @@ def test_component_mqtt_log_handler_publishes_structured_lines():
     comp = _DummyComponent(_context())
     calls: list[tuple[str, dict]] = []
     comp._publish_json = lambda topic, payload, **kwargs: calls.append((topic, payload))
-    handler = MQTTLogHandler(comp, "lucid/agents/agent_1/components/dummy/logs")
+    handler = MQTTLogHandler(
+        lambda topic, payload: comp._publish_json(topic, payload),
+        "lucid/agents/agent_1/components/dummy/logs",
+    )
 
     record = logging.LogRecord(
         name="lucid.component.dummy",

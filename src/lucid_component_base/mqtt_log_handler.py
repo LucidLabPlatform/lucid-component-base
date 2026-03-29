@@ -11,7 +11,7 @@ import threading
 import time
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +32,21 @@ class MQTTLogHandler(logging.Handler):
     - Limits to MAX_BATCHES_PER_WINDOW batches per TIME_WINDOW_S seconds
     """
 
-    def __init__(self, component: Any, topic: str) -> None:
+    def __init__(
+        self,
+        publish_fn: Callable[[str, Dict[str, Any]], None],
+        topic: str,
+    ) -> None:
         """
         Initialize MQTT log handler.
 
         Args:
-            component: Component instance with _publish_json() method
-            topic: MQTT topic to publish logs to
+            publish_fn: Callable that publishes a payload dict to a topic string.
+                        Signature: publish_fn(topic, payload) -> None.
+            topic: MQTT topic to publish logs to.
         """
         super().__init__()
-        self.component = component
+        self._publish_fn = publish_fn
         self.topic = topic
 
         # Batching state
@@ -127,6 +132,14 @@ class MQTTLogHandler(logging.Handler):
             # Silently ignore errors to prevent recursion
             pass
 
+    def close(self) -> None:
+        """Cancel any pending timer and release handler resources."""
+        with self._lock:
+            if self._batch_timer is not None:
+                self._batch_timer.cancel()
+                self._batch_timer = None
+        super().close()
+
     def _publish_batch_timer(self) -> None:
         """Called by timer to publish batch."""
         with self._lock:
@@ -135,7 +148,12 @@ class MQTTLogHandler(logging.Handler):
                 self._publish_batch()
 
     def _publish_batch(self) -> None:
-        """Publish current buffer as a batch if rate limit allows."""
+        """Publish current buffer as a batch if rate limit allows.
+
+        MUST be called with self._lock held. Both callers (emit and
+        _publish_batch_timer) acquire the lock before calling this method.
+        Any future direct caller (e.g. flush()) must do the same.
+        """
         if not self._buffer:
             return
 
@@ -174,7 +192,7 @@ class MQTTLogHandler(logging.Handler):
         }
 
         try:
-            self.component._publish_json(self.topic, payload, retain=False, qos=0)
+            self._publish_fn(self.topic, payload)
         except Exception:
             # Don't log errors from the log handler itself to avoid recursion
             pass

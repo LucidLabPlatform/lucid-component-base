@@ -163,6 +163,83 @@ class Component:
         """Override in subclasses to declare cmd support, e.g. ["reset","ping"]."""
         return []
 
+    def schema(self) -> Dict[str, Any]:
+        """
+        Full MQTT topic schema for this component. Override in subclasses to add
+        component-specific topics. Call super().schema() and merge.
+
+        Published to {base}/schema — retained, re-published on capability change.
+        """
+        base: Dict[str, Any] = {
+            "publishes": {
+                "metadata": {
+                    "fields": {
+                        "component_id": {"type": "string"},
+                        "version": {"type": "string"},
+                        "capabilities": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "status": {
+                    "fields": {
+                        "state": {"type": "string", "enum": ["idle", "running", "error"]},
+                    },
+                },
+                "state": {"fields": {}},
+                "cfg": {"fields": {}},
+                "cfg/logging": {
+                    "fields": {
+                        "log_level": {"type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]},
+                    },
+                },
+                "cfg/telemetry": {"fields": {}},
+                "logs": {
+                    "fields": {
+                        "level": {"type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]},
+                        "message": {"type": "string"},
+                    },
+                },
+                "schema": {},
+            },
+            "subscribes": {
+                "cmd/ping": {"fields": {}},
+                "cmd/reset": {"fields": {}},
+                "cmd/cfg/set": {
+                    "fields": {
+                        "set": {"type": "object", "description": "Key-value pairs to apply"},
+                    },
+                },
+                "cmd/cfg/logging/set": {
+                    "fields": {
+                        "set": {
+                            "type": "object",
+                            "fields": {
+                                "log_level": {"type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]},
+                            },
+                        },
+                    },
+                },
+                "cmd/cfg/telemetry/set": {
+                    "fields": {
+                        "set": {
+                            "type": "object",
+                            "description": "Per-metric config: {metric_name: {enabled, interval_s, change_threshold_percent}}",
+                        },
+                    },
+                },
+            },
+        }
+        # Add evt/*/result for each capability + base commands
+        actions = ["ping", "reset", "cfg/set", "cfg/logging/set", "cfg/telemetry/set"] + self.capabilities()
+        for action in actions:
+            base["publishes"][f"evt/{action}/result"] = {
+                "fields": {
+                    "request_id": {"type": "string"},
+                    "ok": {"type": "boolean"},
+                    "error": {"type": "string"},
+                },
+            }
+        return base
+
     def get_state_payload(self) -> Dict[str, Any]:
         """Current state for retained state topic. Override in subclasses. Contract: { "<metric>": value }."""
         return {}
@@ -241,6 +318,10 @@ class Component:
     # -------------------------
     # Unified MQTT publishing
     # -------------------------
+
+    def publish_schema(self) -> None:
+        """Publish retained schema describing all MQTT topics for this component."""
+        self._publish_retained("schema", self.schema())
 
     def publish_metadata(self) -> None:
         """Publish retained metadata. Contract: { component_id, version, capabilities }."""

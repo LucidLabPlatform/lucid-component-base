@@ -648,7 +648,7 @@ def test_set_telemetry_config_bool_shorthand():
     comp.set_telemetry_config({"cpu": True})
     cfg = comp._telemetry_cfg["cpu"]
     assert cfg["enabled"] is True
-    assert cfg["interval_s"] == 2
+    assert cfg["interval_s"] == 0.1
     assert cfg["change_threshold_percent"] == 2.0
 
 
@@ -662,7 +662,7 @@ def test_set_telemetry_config_applies_defaults_for_missing_fields():
     comp, _ = make_component()
     comp.set_telemetry_config({"cpu": {"enabled": True}})
     cfg = comp._telemetry_cfg["cpu"]
-    assert cfg["interval_s"] == 2
+    assert cfg["interval_s"] == 0.1
     assert cfg["change_threshold_percent"] == 2.0
 
 

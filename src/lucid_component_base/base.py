@@ -109,8 +109,13 @@ class Component:
     """
 
     # Default telemetry config; override via set_telemetry_config()
-    # Structure: { "metric_name": { "enabled": bool, "interval_s": int, "change_threshold_percent": float } }
+    # Structure: { "metric_name": { "enabled": bool, "interval_s": float, "change_threshold_percent": float } }
+    # Telemetry is DISABLED by default; components must explicitly enable metrics.
+    # Default interval_s is 0.1 (10 Hz) to prevent MQTT flooding.
     _DEFAULT_TELEMETRY_CFG: Dict[str, Any] = {}
+    _DEFAULT_METRIC_ENABLED: bool = False
+    _DEFAULT_METRIC_INTERVAL_S: float = 0.1
+    _DEFAULT_METRIC_CHANGE_THRESHOLD_PERCENT: float = 2.0
 
     def __init__(self, context: ComponentContext) -> None:
         self.context = context
@@ -602,12 +607,12 @@ class Component:
             if isinstance(metric_cfg, bool):
                 normalized[metric_name] = {
                     "enabled": metric_cfg,
-                    "interval_s": 2,
-                    "change_threshold_percent": 2.0,
+                    "interval_s": self._DEFAULT_METRIC_INTERVAL_S,
+                    "change_threshold_percent": self._DEFAULT_METRIC_CHANGE_THRESHOLD_PERCENT,
                 }
             elif isinstance(metric_cfg, dict):
-                interval_raw = metric_cfg.get("interval_s", 2)
-                threshold_raw = metric_cfg.get("change_threshold_percent", 2.0)
+                interval_raw = metric_cfg.get("interval_s", self._DEFAULT_METRIC_INTERVAL_S)
+                threshold_raw = metric_cfg.get("change_threshold_percent", self._DEFAULT_METRIC_CHANGE_THRESHOLD_PERCENT)
 
                 if not isinstance(interval_raw, (int, float)) or isinstance(interval_raw, bool):
                     raise ValueError(
@@ -623,8 +628,8 @@ class Component:
                     )
 
                 normalized[metric_name] = {
-                    "enabled": bool(metric_cfg.get("enabled", False)),
-                    "interval_s": int(interval_raw),
+                    "enabled": bool(metric_cfg.get("enabled", self._DEFAULT_METRIC_ENABLED)),
+                    "interval_s": float(interval_raw),
                     "change_threshold_percent": float(threshold_raw),
                 }
 
@@ -642,8 +647,8 @@ class Component:
         if not metric_cfg.get("enabled", False):
             return False
 
-        interval_s = max(1, metric_cfg.get("interval_s", 2))
-        threshold = max(0.0, metric_cfg.get("change_threshold_percent", 2.0))
+        interval_s = max(0.01, metric_cfg.get("interval_s", self._DEFAULT_METRIC_INTERVAL_S))
+        threshold = max(0.0, metric_cfg.get("change_threshold_percent", self._DEFAULT_METRIC_CHANGE_THRESHOLD_PERCENT))
         now = time.time()
         with self._telemetry_last_lock:
             last = self._telemetry_last.get(metric)

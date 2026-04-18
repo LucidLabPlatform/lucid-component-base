@@ -282,7 +282,14 @@ class Component:
             self._set_state(ComponentStatus.FAILED)
             raise
 
-    def stop(self) -> None:
+    def stop(self, *, final: bool = False) -> None:
+        """Stop the component.
+
+        Args:
+            final: True when the entire agent process is shutting down.
+                   Components may use this to release process-global resources
+                   (e.g. rospy) that are normally kept alive for restart.
+        """
         if self._state.status == ComponentStatus.STOPPED:
             return
         if self._state.status == ComponentStatus.STOPPING:
@@ -291,7 +298,11 @@ class Component:
         self._set_state(ComponentStatus.STOPPING)
 
         try:
-            self._stop()
+            try:
+                self._stop(final=final)
+            except TypeError:
+                # Component doesn't accept final kwarg yet — call without it
+                self._stop()
             self._state.stopped_at = _utc_iso()
             self._set_state(ComponentStatus.STOPPED)
         except Exception as exc:
@@ -722,7 +733,7 @@ class Component:
     def _start(self) -> None:
         raise NotImplementedError
 
-    def _stop(self) -> None:
+    def _stop(self, *, final: bool = False) -> None:
         raise NotImplementedError
 
     def _set_state(self, status: ComponentStatus) -> None:

@@ -489,6 +489,24 @@ class Component:
         }
         self._publish_json(topic, payload, retain=False, qos=1)
 
+    def subscribe(
+        self,
+        topic: str,
+        callback: Callable[[str, str], None],
+        *,
+        qos: int = 0,
+    ) -> None:
+        """Subscribe to an MQTT topic through the agent's shared connection.
+
+        callback(actual_topic, payload_str) is called for each matching message.
+        Supports MQTT wildcards (+ and #). Call unsubscribe() in _stop().
+        """
+        self.context.mqtt.subscribe(topic, callback, qos=qos)
+
+    def unsubscribe(self, topic: str) -> None:
+        """Remove a subscription registered via subscribe()."""
+        self.context.mqtt.unsubscribe(topic)
+
     def _parse_cfg_set_payload(
         self, payload_str: str
     ) -> tuple[str, dict[str, Any], Optional[str]]:

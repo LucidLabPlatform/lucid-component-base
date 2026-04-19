@@ -9,17 +9,35 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Protocol
+from typing import Any, Callable, Dict, Protocol
 
 
 class MqttPublisher(Protocol):
     """
-    Minimal interface components need from the MQTT client.
+    Interface components use to interact with the MQTT broker.
+
+    All communication goes through the agent's single shared connection —
+    components must never create their own MQTT clients.
     """
 
     def publish(
         self, topic: str, payload: Any, *, qos: int = 0, retain: bool = False
     ) -> Any: ...
+
+    def subscribe(
+        self,
+        topic: str,
+        callback: Callable[[str, str], None],
+        *,
+        qos: int = 0,
+    ) -> None:
+        """Subscribe to a topic (supports MQTT wildcards + and #).
+        callback(actual_topic, payload_str) is called for each matching message."""
+        ...
+
+    def unsubscribe(self, topic: str) -> None:
+        """Remove a subscription registered via subscribe()."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

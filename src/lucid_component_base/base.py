@@ -31,6 +31,15 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class ComponentNotReady(Exception):
+    """Raised from _start() when the component cannot start yet but is not broken.
+
+    The agent sets status to stopped (idle) instead of error, and cmd subscriptions
+    are still registered so a reset command can trigger a retry once conditions change
+    (e.g. roscore becomes available).
+    """
+
+
 class ComponentStatus(str, Enum):
     STOPPED = "stopped"
     STARTING = "starting"
@@ -277,6 +286,11 @@ class Component:
             self._state.started_at = _utc_iso()
             self._state.stopped_at = None
             self._set_state(ComponentStatus.RUNNING)
+        except ComponentNotReady as exc:
+            self._state.last_error = str(exc)
+            self._set_state(ComponentStatus.STOPPED)
+            # Do NOT re-raise — component is idle, not broken.
+            # Cmd subscriptions are still registered so reset can trigger a retry.
         except Exception as exc:
             self._state.last_error = str(exc)
             self._set_state(ComponentStatus.FAILED)

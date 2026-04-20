@@ -9,6 +9,7 @@ from __future__ import annotations
 from ._version import __version__
 from .base import (
     Component,
+    ComponentNotReady,
     ComponentState,
     ComponentStatus,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "__version__",
     "Component",
     "ComponentContext",
+    "ComponentNotReady",
     "ComponentState",
     "ComponentStatus",
     "MqttPublisher",

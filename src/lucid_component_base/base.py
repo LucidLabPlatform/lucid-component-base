@@ -714,10 +714,13 @@ class Component:
         return value != last_value
 
     def _make_cmd_handler(self, action: str, method: Callable) -> Callable[[str], None]:
-        """Wrap a command handler with per-action request_id deduplication.
+        """Wrap a command handler with per-action request_id deduplication and exception safety.
 
         Duplicate request_ids are rejected: a failure result is published and the
         handler is not invoked. Empty / missing request_ids bypass deduplication.
+
+        If the handler raises any exception, an ok=False result is published so the
+        orchestrator receives a definitive answer instead of timing out silently.
         """
 
         def handler(payload_str: str) -> None:
@@ -741,7 +744,15 @@ class Component:
                         )
                         return
                     seen.add(request_id)
-            method(payload_str)
+            try:
+                method(payload_str)
+            except Exception as exc:
+                logger.exception(
+                    "Unhandled exception in cmd handler component=%s action=%s",
+                    self.component_id,
+                    action,
+                )
+                self.publish_result(action, request_id, ok=False, error=str(exc))
 
         return handler
 

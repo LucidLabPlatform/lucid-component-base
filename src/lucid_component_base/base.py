@@ -419,9 +419,19 @@ class Component:
         _logging.getLogger(f"lucid.component.{self.component_id}").setLevel(level_upper)
 
     def publish_log(self, level: str, message: str) -> None:
-        """Publish logs stream. level: debug|info|warning|error."""
+        """Publish a single log line via the canonical {count, lines} envelope.
+
+        Emits the same shape as MQTTLogHandler so the logs topic carries one
+        consistent contract regardless of which path produced the line.
+        """
         topic = self.context.topic("logs")
-        payload = {"level": level, "message": message}
+        line = {
+            "ts": _utc_iso(),
+            "level": level,
+            "logger": f"lucid.component.{self.component_id}",
+            "message": message,
+        }
+        payload = {"count": 1, "lines": [line]}
         self._publish_json(topic, payload, retain=False, qos=0)
 
     def _setup_mqtt_logging(self) -> None:

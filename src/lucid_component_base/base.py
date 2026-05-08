@@ -723,6 +723,27 @@ class Component:
             pass
         return value != last_value
 
+    def _publish_handler_failure(
+        self, action: str, request_id: str, error: str
+    ) -> None:
+        """Publish a failure result for *action*, picking the right envelope.
+
+        For cfg-set actions (cfg/set, cfg/logging/set, cfg/telemetry/set) the
+        contract requires the {request_id, ok, applied, error, ts} shape via
+        publish_cfg_set_result. Other actions use the simpler {request_id, ok,
+        error} shape via publish_result.
+        """
+        if action.startswith("cfg/") and action.endswith("/set"):
+            self.publish_cfg_set_result(
+                request_id=request_id,
+                ok=False,
+                applied=None,
+                error=error,
+                action=action,
+            )
+        else:
+            self.publish_result(action, request_id, ok=False, error=error)
+
     def _make_cmd_handler(self, action: str, method: Callable) -> Callable[[str], None]:
         """Wrap a command handler with per-action request_id deduplication and exception safety.
 
@@ -731,6 +752,10 @@ class Component:
 
         If the handler raises any exception, an ok=False result is published so the
         orchestrator receives a definitive answer instead of timing out silently.
+
+        Both the duplicate-rejection and exception paths route through
+        _publish_handler_failure so cfg-set actions get the correct envelope
+        (with applied=None and ts) instead of the generic publish_result shape.
         """
 
         def handler(payload_str: str) -> None:
@@ -749,8 +774,8 @@ class Component:
                             self.component_id,
                             action,
                         )
-                        self.publish_result(
-                            action, request_id, ok=False, error="duplicate request_id"
+                        self._publish_handler_failure(
+                            action, request_id, "duplicate request_id"
                         )
                         return
                     seen.add(request_id)
@@ -762,7 +787,7 @@ class Component:
                     self.component_id,
                     action,
                 )
-                self.publish_result(action, request_id, ok=False, error=str(exc))
+                self._publish_handler_failure(action, request_id, str(exc))
 
         return handler
 

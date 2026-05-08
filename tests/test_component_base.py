@@ -483,8 +483,14 @@ def test_publish_log_topic_and_payload():
     assert call["retain"] is False
     assert call["qos"] == 0
     body = json.loads(call["payload"])
-    assert body["level"] == "info"
-    assert body["message"] == "hello world"
+    # Canonical {count, lines:[...]} envelope, matching MQTTLogHandler
+    assert body["count"] == 1
+    assert len(body["lines"]) == 1
+    line = body["lines"][0]
+    assert line["level"] == "info"
+    assert line["message"] == "hello world"
+    assert line["logger"] == "lucid.component.dummy"
+    assert "ts" in line
 
 
 # ---------------------------------------------------------------------------

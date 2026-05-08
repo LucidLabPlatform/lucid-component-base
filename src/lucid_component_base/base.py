@@ -40,6 +40,16 @@ class ComponentNotReady(Exception):
     """
 
 
+class CmdPayloadError(ValueError):
+    """Raised by Component._parse_cmd_payload on a malformed cmd payload.
+
+    The exception is caught by _make_cmd_handler's existing exception path and
+    routed through _publish_handler_failure, which emits the right evt/<action>/result
+    envelope (cfg-set shape for cfg/*/set actions, generic shape otherwise) with
+    ok=False. Subclasses do not need to catch this themselves.
+    """
+
+
 class ComponentStatus(str, Enum):
     STOPPED = "stopped"
     STARTING = "starting"
@@ -530,6 +540,27 @@ class Component:
     def unsubscribe(self, topic: str) -> None:
         """Remove a subscription registered via subscribe()."""
         self.context.mqtt.unsubscribe(topic)
+
+    def _parse_cmd_payload(self, payload_str: str) -> tuple[str, Dict[str, Any]]:
+        """Parse a cmd payload string into (request_id, data).
+
+        Replaces the per-handler boilerplate of try/json.loads/extract that
+        otherwise gets duplicated at every on_cmd_* site. Returns the empty
+        envelope (``""``, ``{}``) on a missing/empty body.
+
+        Raises CmdPayloadError on malformed JSON or a non-object root.
+        _make_cmd_handler catches this and publishes evt/<action>/result with
+        ok=False via _publish_handler_failure, so handlers do not need their
+        own try/except for parse failures.
+        """
+        try:
+            data = json.loads(payload_str) if payload_str else {}
+        except json.JSONDecodeError as exc:
+            raise CmdPayloadError(f"invalid JSON payload: {exc}") from exc
+        if not isinstance(data, dict):
+            raise CmdPayloadError("payload must be a JSON object")
+        request_id = data.get("request_id", "")
+        return request_id, data
 
     def _parse_cfg_set_payload(
         self, payload_str: str

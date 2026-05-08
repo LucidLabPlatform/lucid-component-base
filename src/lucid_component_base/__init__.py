@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from ._version import __version__
 from .base import (
+    CmdPayloadError,
     Component,
     ComponentNotReady,
     ComponentState,
@@ -17,6 +18,7 @@ from .context import ComponentContext, MqttPublisher
 
 __all__ = [
     "__version__",
+    "CmdPayloadError",
     "Component",
     "ComponentContext",
     "ComponentNotReady",

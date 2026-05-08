@@ -937,6 +937,90 @@ def test_parse_cfg_set_payload_non_dict_set():
 
 
 # ---------------------------------------------------------------------------
+# _parse_cmd_payload
+# ---------------------------------------------------------------------------
+
+
+def test_parse_cmd_payload_valid():
+    from lucid_component_base import CmdPayloadError  # noqa: F401 — import smoke
+    comp, _ = make_component()
+    rid, data = comp._parse_cmd_payload(
+        json.dumps({"request_id": "r1", "key": "value"})
+    )
+    assert rid == "r1"
+    assert data == {"request_id": "r1", "key": "value"}
+
+
+def test_parse_cmd_payload_empty_string():
+    comp, _ = make_component()
+    rid, data = comp._parse_cmd_payload("")
+    assert rid == ""
+    assert data == {}
+
+
+def test_parse_cmd_payload_missing_request_id():
+    comp, _ = make_component()
+    rid, data = comp._parse_cmd_payload(json.dumps({"foo": "bar"}))
+    assert rid == ""
+    assert data == {"foo": "bar"}
+
+
+def test_parse_cmd_payload_invalid_json_raises():
+    from lucid_component_base import CmdPayloadError
+    comp, _ = make_component()
+    with pytest.raises(CmdPayloadError) as exc_info:
+        comp._parse_cmd_payload("not json")
+    assert "invalid JSON payload" in str(exc_info.value)
+
+
+def test_parse_cmd_payload_non_object_root_raises():
+    from lucid_component_base import CmdPayloadError
+    comp, _ = make_component()
+    with pytest.raises(CmdPayloadError) as exc_info:
+        comp._parse_cmd_payload(json.dumps([1, 2, 3]))
+    assert "payload must be a JSON object" in str(exc_info.value)
+
+
+def test_make_cmd_handler_publishes_ok_false_on_cmd_payload_error():
+    """Handler raising CmdPayloadError gets caught and routed via _publish_handler_failure."""
+    comp, mqtt = make_component()
+
+    def failing_handler(payload_str: str) -> None:
+        # Simulate a handler that uses _parse_cmd_payload with a bad payload
+        comp._parse_cmd_payload(payload_str)
+
+    handler = comp._make_cmd_handler("ping", failing_handler)
+    handler("not json")
+    # Result topic should carry ok=false with the parse error
+    publishes = [c for c in mqtt.calls if c["topic"].endswith("/evt/ping/result")]
+    assert len(publishes) == 1
+    body = json.loads(publishes[0]["payload"])
+    assert body["ok"] is False
+    assert "invalid JSON payload" in body["error"]
+
+
+def test_make_cmd_handler_uses_cfg_set_envelope_on_cmd_payload_error():
+    """For cfg/*/set actions, the failure routes through publish_cfg_set_result."""
+    comp, mqtt = make_component()
+
+    def failing_handler(payload_str: str) -> None:
+        comp._parse_cmd_payload(payload_str)
+
+    handler = comp._make_cmd_handler("cfg/logging/set", failing_handler)
+    handler("not json")
+    publishes = [
+        c for c in mqtt.calls if c["topic"].endswith("/evt/cfg/logging/set/result")
+    ]
+    assert len(publishes) == 1
+    body = json.loads(publishes[0]["payload"])
+    # cfg-set envelope shape: includes applied=None and ts
+    assert body["ok"] is False
+    assert body["applied"] is None
+    assert "ts" in body
+    assert "invalid JSON payload" in body["error"]
+
+
+# ---------------------------------------------------------------------------
 # _publish_json error handling
 # ---------------------------------------------------------------------------
 

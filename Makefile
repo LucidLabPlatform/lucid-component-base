@@ -31,21 +31,21 @@ test: test-unit test-integration
 
 test-unit:
 	@if [ -d tests ]; then \
-		pytest tests/ -v -q; \
+		$(VENV)/bin/python -m pytest tests/ -v -q; \
 	else \
 		echo "No tests directory found."; \
 	fi
 
 test-integration:
 	@if [ -d tests/integration ]; then \
-		pytest tests/integration/ -v -q; \
+		$(VENV)/bin/python -m pytest tests/integration/ -v -q; \
 	else \
 		echo "No integration tests."; \
 	fi
 
 test-coverage:
 	@if [ -d tests ]; then \
-		pytest tests/ --cov=src/lucid_component_base --cov-report=html --cov-report=term-missing -q; \
+		$(VENV)/bin/python -m pytest tests/ --cov=src/lucid_component_base --cov-report=html --cov-report=term-missing -q; \
 	else \
 		echo "No tests directory found."; \
 	fi
